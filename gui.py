@@ -39,6 +39,7 @@ from config import (
     DEFAULT_SHOW_LABELS,
     DEFAULT_THEME,
     FILE_FILTER,
+    FrameResult,
     MODEL_PATH,
     MIN_CONFIDENCE_PERCENT,
     NMS_STUDENT,
@@ -204,8 +205,10 @@ class VideoLabel(QLabel):
         super().__init__()
         self._pixmap = QPixmap()
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumSize(260, 190)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(240, 180)
+        # Ignored: the scaled pixmap must never become the minimum size of the view,
+        # otherwise the window could not shrink again after a large frame was shown.
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
 
     def set_frame(self, image: QImage) -> None:
         self._pixmap = QPixmap.fromImage(image)
@@ -321,13 +324,11 @@ class AppWindow(QMainWindow):
         video_layout.setContentsMargins(0, 0, 0, 0)
         video_grid = QGridLayout()
         video_grid.setSpacing(10)
-        self.original_panel = self._create_video_card("Original View")
         self.candidate_panel = self._create_video_card("Candidate Detections (before NMS)")
         self.final_panel = self._create_video_card("Final Detections (after NMS)")
-        video_grid.addWidget(self.original_panel, 0, 0)
-        video_grid.addWidget(self.candidate_panel, 0, 1)
-        video_grid.addWidget(self.final_panel, 0, 2)
-        for column in range(3):
+        video_grid.addWidget(self.candidate_panel, 0, 0)
+        video_grid.addWidget(self.final_panel, 0, 1)
+        for column in range(2):
             video_grid.setColumnStretch(column, 1)
         video_layout.addLayout(video_grid, 1)
 
@@ -354,6 +355,7 @@ class AppWindow(QMainWindow):
         splitter.addWidget(video_side)
         splitter.addWidget(self._build_sidebar())
         splitter.setSizes([1140, 380])
+        self.splitter = splitter
         root.addWidget(splitter, 1)
 
         self.setCentralWidget(central)
@@ -364,9 +366,15 @@ class AppWindow(QMainWindow):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
+        header = QHBoxLayout()
         title_label = QLabel(title)
         title_label.setObjectName("PanelTitle")
-        layout.addWidget(title_label)
+        count_label = QLabel("--")
+        count_label.setObjectName("ValueChip")
+        count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(title_label, 1)
+        header.addWidget(count_label)
+        layout.addLayout(header)
         canvas = QFrame()
         canvas.setObjectName("VideoCanvas")
         canvas_layout = QVBoxLayout(canvas)
@@ -376,6 +384,7 @@ class AppWindow(QMainWindow):
         canvas_layout.addWidget(image)
         layout.addWidget(canvas, 1)
         card.image = image
+        card.count_label = count_label
         return card
 
     def _build_sidebar(self) -> QWidget:
@@ -477,13 +486,15 @@ class AppWindow(QMainWindow):
         class_buttons.addWidget(self.all_classes_button)
         class_buttons.addWidget(self.no_classes_button)
         class_layout.addLayout(class_buttons)
-        layout.addWidget(class_box)
 
         stats_box = QGroupBox("Statistics")
         stats_layout = QGridLayout(stats_box)
         self.metric_values: dict[str, QLabel] = {}
         for row, name in enumerate(
-            ("Candidates", "Final detections", "Mean confidence", "FPS")
+            (
+                "Candidates", "Final detections", "Mean confidence", "FPS",
+                "Frame size", "Model (ms)", "Post-processing (ms)",
+            )
         ):
             label = QLabel(name)
             label.setObjectName("Metric")
@@ -492,7 +503,8 @@ class AppWindow(QMainWindow):
             stats_layout.addWidget(label, row, 0)
             stats_layout.addWidget(value, row, 1)
             self.metric_values[name] = value
-        layout.addWidget(stats_box)
+        layout.addWidget(stats_box)  # before the long class list, so it is visible without scrolling
+        layout.addWidget(class_box)
         layout.addStretch(1)
 
         for control in (self.confidence_slider, self.nms_slider):
@@ -544,6 +556,7 @@ class AppWindow(QMainWindow):
         self.video_thread.frame_ready.connect(self._update_frames)
         self.video_thread.status_changed.connect(self.status_label.setText)
         self.video_thread.processing_error.connect(self._show_error)
+        self.video_thread.source_error.connect(self._show_source_error)
         self.video_thread.start()
         self.pause_button.setText("Pause")
         self.status_label.setText("Starting source...")
@@ -554,20 +567,36 @@ class AppWindow(QMainWindow):
             self.video_thread.deleteLater()
             self.video_thread = None
 
-    def _update_frames(
-        self, qt_orig, qt_candidates, qt_final, candidates: int, finals: int, mean_conf: float, fps: float
-    ) -> None:
-        self.original_panel.image.set_frame(qt_orig)
-        self.candidate_panel.image.set_frame(qt_candidates)
-        self.final_panel.image.set_frame(qt_final)
-        self.metric_values["Candidates"].setText(str(candidates))
-        self.metric_values["Final detections"].setText(str(finals))
-        self.metric_values["Mean confidence"].setText(f"{mean_conf:.2f}" if finals else "--")
-        self.metric_values["FPS"].setText(f"{fps:.1f}")
-        self.fps_label.setText(f"FPS: {fps:.1f}")
+    def _set_metric(self, name: str, text: str) -> None:
+        label = self.metric_values[name]
+        if label.text() != text:
+            label.setText(text)
+
+    def _update_frames(self, result: FrameResult) -> None:
+        if self._closing:
+            return
+        self.candidate_panel.image.set_frame(result.candidate_view)
+        self.final_panel.image.set_frame(result.final_view)
+        self.candidate_panel.count_label.setText(f"{result.num_candidates} boxes")
+        self.final_panel.count_label.setText(f"{result.num_final} objects")
+        self._set_metric("Candidates", str(result.num_candidates))
+        self._set_metric("Final detections", str(result.num_final))
+        self._set_metric("Mean confidence", f"{result.mean_confidence:.2f}" if result.num_final else "--")
+        fps_text = f"{result.fps:.1f}" if result.fps > 0 else "--"
+        self._set_metric("FPS", fps_text)
+        self._set_metric("Frame size", f"{result.frame_width}×{result.frame_height}")
+        self._set_metric("Model (ms)", f"{result.model_ms:.1f}")
+        self._set_metric("Post-processing (ms)", f"{result.postprocess_ms:.1f}")
+        if self.fps_label.text() != f"FPS: {fps_text}":
+            self.fps_label.setText(f"FPS: {fps_text}")
+        if self.video_thread is not None:
+            self.video_thread.frame_consumed()
 
     def _show_error(self, message: str) -> None:
         self.error_label.setText(f"postprocess_detections error: {message}" if message else "")
+
+    def _show_source_error(self, message: str) -> None:
+        self.error_label.setText(f"Source error: {message}" if message else "")
 
     def _parameters_changed(self, *_args) -> None:
         if self._restoring:
@@ -629,15 +658,22 @@ class AppWindow(QMainWindow):
         self.class_list.blockSignals(False)
         self._parameters_changed()
 
+    def _apply_source(self) -> None:
+        """Tell the (already running) video thread which source to use."""
+        self.pause_button.setText("Pause")
+        if self.video_thread is not None:
+            self.video_thread.set_source(self.source_type, self.selected_file, self.camera_spin.value())
+
     def _use_webcam(self) -> None:
         self.source_type = "camera"
         self._save_settings()
-        self._start_video_thread()
+        self.status_label.setText("Starting webcam...")
+        self._apply_source()
 
     def _camera_index_changed(self, _value: int) -> None:
         self._save_settings()
-        if self.source_type == "camera" and not self._closing and self.video_thread is not None:
-            self._start_video_thread()
+        if self.source_type == "camera" and not self._closing:
+            self._apply_source()
 
     def _browse_file(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Image or Video", "", FILE_FILTER)
@@ -654,7 +690,8 @@ class AppWindow(QMainWindow):
             return
         self.source_type = "file"
         self._save_settings()
-        self._start_video_thread()
+        self.status_label.setText(f"Opening {Path(self.selected_file).name}...")
+        self._apply_source()
 
     def _toggle_pause(self) -> None:
         if self.video_thread is None:
@@ -720,6 +757,8 @@ class AppWindow(QMainWindow):
         self.settings.setValue("show_labels", self.labels_check.isChecked())
         self.settings.setValue("show_confidence", self.confidence_check.isChecked())
         self.settings.setValue("unchecked_classes", ",".join(unchecked))
+        self.settings.setValue("window/geometry", self.saveGeometry())
+        self.settings.setValue("window/splitter", self.splitter.saveState())
         self.settings.sync()
         self.settings_label.setText("Settings: Saved")
 
@@ -751,6 +790,11 @@ class AppWindow(QMainWindow):
                 self.class_list.item(int(token)).setCheckState(Qt.CheckState.Unchecked)
         self.class_list.blockSignals(False)
         self._update_mode_buttons()
+        geometry, splitter_state = self.settings.value("window/geometry"), self.settings.value("window/splitter")
+        if geometry:
+            self.restoreGeometry(geometry)
+        if splitter_state:
+            self.splitter.restoreState(splitter_state)
         self._restoring = False
         self.settings_label.setText("Settings: Restored")
 
@@ -765,6 +809,9 @@ class AppWindow(QMainWindow):
 def create_application() -> QApplication:
     app = QApplication.instance()
     if app is None:
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
         app = QApplication([])
     app.setOrganizationName(ORGANIZATION_NAME)
     app.setApplicationName(APP_NAME)

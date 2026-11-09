@@ -8,7 +8,7 @@ ORGANIZATION_NAME = "Sharif CVML Lab"
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "assets" / "yolov5s.onnx"
-INPUT_SIZE = 640  # YOLOv5 @ 640 produces 3 * (80*80 + 40*40 + 20*20) = 25200 proposals
+INPUT_SIZE = 640  # 640x640 input: 8400 proposals (anchor-free export) or 25200 (classic YOLOv5 export)
 
 CAPTURE_WIDTH = 640
 CAPTURE_HEIGHT = 480
@@ -31,6 +31,15 @@ DEFAULT_SETTINGS_MESSAGE = "Settings: Ready"
 
 CANDIDATE_COLOR = (0, 165, 255)  # BGR, orange
 FINAL_COLOR = (60, 220, 140)     # BGR, green
+
+# Annotation / display. Frames are brought to a "render size" before anything is drawn, so
+# boxes, text and labels look the same for a 160x120 thumbnail and a 4000x3000 photo.
+MIN_RENDER_SIDE = 640    # frames whose longest side is smaller are enlarged to this size
+MAX_RENDER_SIDE = 1600   # frames whose longest side is larger are reduced to this size
+MAX_DRAWN_CANDIDATES = 300  # at most this many (highest-score) candidates are drawn
+
+FPS_WINDOW = 10               # frames used for the running FPS estimate
+FRAME_TIMEOUT_SECONDS = 1.0   # a frame the GUI has not shown after this long is re-sent
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff")
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
@@ -56,6 +65,22 @@ COCO_CLASSES = [
     "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier",
     "toothbrush",
 ]
+
+
+@dataclass
+class FrameResult:
+    """Everything the GUI needs to show one processed frame (sent from the video thread)."""
+
+    candidate_view: object = None  # QImage: candidates (after confidence filter, before NMS)
+    final_view: object = None      # QImage: final detections (after NMS)
+    num_candidates: int = 0
+    num_final: int = 0
+    mean_confidence: float = 0.0
+    fps: float = 0.0               # 0.0 = frozen (pause / still image)
+    model_ms: float = 0.0          # YOLO network time
+    postprocess_ms: float = 0.0    # confidence filtering + NMS time
+    frame_width: int = 0
+    frame_height: int = 0
 
 
 @dataclass(frozen=True)

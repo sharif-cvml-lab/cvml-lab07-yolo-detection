@@ -40,7 +40,8 @@ def postprocess_detections(
     - Do not draw anything and do not use cv2.dnn.NMSBoxes, torchvision.ops.nms or
       ultralytics NMS here. The point of the lab is to write NMS yourself with NumPy.
 
-    Inputs (one entry per raw model proposal, e.g. 25200 of them):
+    Inputs (one entry per raw model proposal; 8400 for the Ultralytics export shipped with this
+    lab, 25200 for the classic YOLOv5 export):
 
         boxes:      float32 array, shape (N, 4), pixel coordinates (x1, y1, x2, y2)
         scores:     float32 array, shape (N,), confidence of each proposal
